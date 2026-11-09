@@ -102,6 +102,8 @@ export function saveUniversalByok(next) {
       localStorage.setItem('gemini_key', merged.llmApiKey);
     } else if (merged.geminiFallbackKey) {
       localStorage.setItem('gemini_key', merged.geminiFallbackKey);
+    } else if (merged.llmProvider && merged.llmProvider !== 'gemini') {
+      localStorage.removeItem('gemini_key');
     }
     if (merged.elevenLabsApiKey) {
       localStorage.setItem('elevenLabsKey_v1', encryptKey(merged.elevenLabsApiKey));

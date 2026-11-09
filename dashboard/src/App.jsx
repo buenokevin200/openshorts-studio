@@ -1128,9 +1128,12 @@ function App() {
 
     try {
       let body;
-      // BYOK sends the Gemini header; managed users rely on the bearer token
-      // that apiFetch attaches automatically.
-      const headers = apiKey ? { 'X-Gemini-Key': apiKey } : {};
+      // BYOK sends the Gemini header only when Gemini is the selected provider
+      // or a real Google Gemini key (AIza...) is configured; Universal BYOK headers
+      // (X-LLM-Provider, X-LLM-Key, etc.) are attached automatically by apiFetch.
+      const useGeminiHeader =
+        apiKey && (universalByok?.llmProvider === 'gemini' || String(apiKey).trim().startsWith('AIza'));
+      const headers = useGeminiHeader ? { 'X-Gemini-Key': apiKey } : {};
 
       // Advanced generation controls: only sent when the user set them, so the
       // default request stays byte-identical to the pre-feature one.

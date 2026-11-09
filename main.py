@@ -2382,31 +2382,145 @@ def _visual_pass(client, model_name, video_path, duration, language,
                 pass
 
 
+def _visual_clips_with_llm_backend(video_path, video_duration, language,
+                                   v_min_clips, v_max_clips, v_min_secs, v_max_secs,
+                                   viewer_clips=None):
+    """Clip a silent/music-only video when using an OpenAI-compatible LLM
+    (e.g. Huawei Cloud MaaS GLM-5.2) without requiring a Google Gemini API key.
+
+    Samples frames at ~1 fps with OpenCV to measure visual motion intensity,
+    scene cuts, and brightness, builds candidate visual action windows, and asks
+    ``llm_backend`` to select the best moments and write viral hooks/titles.
+    """
+    print(f"🤖  Silent/music video — analyzing visual motion & scene cuts + LLM ({llm_backend.model_name()})...")
+    title = os.path.splitext(os.path.basename(video_path))[0].replace("_", " ")
+    dur = max(1.0, float(video_duration or 60.0))
+
+    # 1. Sample 1 frame/sec with OpenCV to measure visual motion & scene changes
+    timeline = []
+    cap = cv2.VideoCapture(video_path)
+    try:
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        step = max(1, int(round(fps)))
+        prev_gray = None
+        frame_idx = 0
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            if frame_idx % step == 0:
+                sec = round(frame_idx / fps, 1)
+                small = cv2.resize(frame, (160, 90))
+                gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+                brightness = float(np.mean(gray))
+                motion = float(np.mean(cv2.absdiff(gray, prev_gray))) if prev_gray is not None else 0.0
+                prev_gray = gray
+                timeline.append({
+                    "t": sec,
+                    "motion": round(motion, 1),
+                    "bright": round(brightness, 1),
+                    "scene_cut": motion > 28.0,
+                })
+            frame_idx += 1
+    except Exception as e:
+        print(f"⚠️ OpenCV motion scan warning: {e}")
+    finally:
+        cap.release()
+
+    # 2. Build candidate windows of ~target length ranked by visual action
+    target_len = min(max(v_min_secs, 22.0), v_max_secs)
+    if dur <= v_min_secs:
+        candidates = [{"start": 0.0, "end": round(dur, 2), "avg_motion": 50.0, "cuts": 1}]
+    else:
+        stride = max(5.0, target_len * 0.5)
+        raw_windows = []
+        t0 = 0.0
+        while t0 + v_min_secs <= dur:
+            t1 = min(dur, round(t0 + target_len, 2))
+            pts = [p for p in timeline if t0 <= p["t"] <= t1]
+            avg_m = sum(p["motion"] for p in pts) / max(1, len(pts))
+            cuts = sum(1 for p in pts if p.get("scene_cut"))
+            raw_windows.append({
+                "start": round(t0, 2),
+                "end": round(t1, 2),
+                "avg_motion": round(avg_m, 1),
+                "scene_cuts": cuts,
+            })
+            t0 += stride
+        raw_windows.sort(key=lambda w: (w["avg_motion"] + w["scene_cuts"] * 3.0), reverse=True)
+        candidates = raw_windows[:max(v_max_clips * 2, 12)]
+        candidates.sort(key=lambda w: w["start"])
+
+    prompt = (
+        f"You are a senior short-form video editor. This video ('{title}', duration {dur:.1f}s) "
+        f"is a trailer / music / visual video with no spoken dialogue.\n"
+        f"Below are the visual motion & scene-cut measurements across the video timeline:\n"
+        f"{json.dumps(candidates, ensure_ascii=False)}\n"
+        f"{_viewer_hint(viewer_clips, 0, dur)}\n"
+        f"Pick the {v_min_clips} to {v_max_clips} MOST engaging non-overlapping visual moments "
+        f"for TikTok / Reels / YouTube Shorts (each between {v_min_secs:g} and {v_max_secs:g} seconds long, "
+        f"0 <= start < end <= {dur:.1f}).\n"
+        f"Write catchy copy in {language or 'en'} based on the video title '{title}' and visual pacing.\n"
+        f"Return ONLY valid JSON matching the schema:\n"
+        f'{{"shorts": [{{"start": 10.0, "end": 35.0, "predicted_score": 90, '
+        f'"video_description_for_tiktok": "...", "video_description_for_instagram": "...", '
+        f'"video_title_for_youtube_short": "...", "viral_hook_text": "..."}}]}}'
+    )
+
+    clean = []
+    cost = None
+    try:
+        parsed, cost = llm_backend.generate_json(prompt, gemini_worker.VisualResponse)
+        for s in (parsed or {}).get("shorts") or []:
+            st = max(0.0, float(s.get("start", 0)))
+            en = min(dur, float(s.get("end", 0)))
+            if en - st >= 1.0:
+                s["start"] = round(st, 3)
+                s["end"] = round(en, 3)
+                clean.append(s)
+    except Exception as e:
+        print(f"⚠️ LLM visual selection warning ({e}) — using top visual motion windows.")
+
+    # Deterministic fallback if the LLM returned no valid non-overlapping windows
+    if not clean:
+        ranked = sorted(candidates, key=lambda w: w.get("avg_motion", 0), reverse=True)
+        used = []
+        for idx, w in enumerate(ranked):
+            st, en = float(w["start"]), float(w["end"])
+            if any(not (en <= u0 or st >= u1) for u0, u1 in used):
+                continue
+            used.append((st, en))
+            clean.append({
+                "start": round(st, 3),
+                "end": round(en, 3),
+                "predicted_score": max(70, 95 - idx * 4),
+                "video_description_for_tiktok": f"🔥 {title} highlight #{idx + 1}! Follow for more! #shorts #viral #gaming",
+                "video_description_for_instagram": f"⚡ Best moment from {title}! Comment below 👇 #reels #viral",
+                "video_title_for_youtube_short": f"{title} - Highlight #{idx + 1} 🔥"[:95],
+                "viral_hook_text": f"Wait for this moment! 🔥",
+            })
+            if len(clean) >= max(v_min_clips, min(5, v_max_clips)):
+                break
+
+    clean.sort(key=lambda c: c["start"])
+    clean = trim_to_best(dedupe_overlapping(clean), v_max_clips)
+    if not clean:
+        return None
+    result = {"shorts": clean}
+    if cost:
+        result["cost_analysis"] = cost
+    return result
+
+
 def get_visual_clips(video_path, video_duration, language="en", viewer_clips=None):
     """Clip a SILENT video by vision: Gemini watches the footage and picks the
     most engaging visual moments (no transcript). Returns the same
     {"shorts", "cost_analysis"} shape as get_viral_clips, or None.
 
-    Gemini always watches a 360p/1 fps proxy (``_vision_proxy``), never the
-    source file: a broken capture (unreadable audio, MPEG-TS in MP4) made the
-    model answer 400 INVALID_ARGUMENT, and a raw upload runs to hundreds of
-    MB. A source longer than VISION_SEGMENT_SECONDS is watched stretch by
-    stretch (``vision_segments``), and the picks are merged, de-overlapped
-    and cut to the best ``CLIP_TARGET_MAX`` by score: a silent multi-hour
-    console capture used to fail at the model."""
-    print("🎥  Silent video — analyzing with Gemini vision (no transcript)...")
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        if llm_backend.active():
-            print("❌ This video has no usable speech, so it has to be clipped by "
-                  "watching it, and that needs Gemini (a text-only LLM server "
-                  "cannot see the footage). Add a GEMINI_API_KEY for silent videos.")
-        else:
-            print("❌ Error: GEMINI_API_KEY not found.")
-        return None
-    client = genai.Client(api_key=api_key)
-    model_name = os.environ.get("GEMINI_MODEL") or 'gemini-3.1-flash-lite'
-
+    When an OpenAI-compatible LLM (e.g. Huawei Cloud MaaS GLM-5.2) is active and
+    no valid Google GEMINI_API_KEY is configured, uses OpenCV visual motion +
+    scene-cut analysis paired with ``llm_backend`` so silent/trailer videos work
+    without requiring a Google key."""
     # The vision path has no scoring windows to derive a count from, so the
     # env targets (user request) apply directly over the classic 3-15.
     def _env_int(name, default):
@@ -2417,6 +2531,22 @@ def get_visual_clips(video_path, video_duration, language="en", viewer_clips=Non
     v_min_clips = _env_int("CLIP_TARGET_MIN", 3)
     v_max_clips = max(v_min_clips, _env_int("CLIP_TARGET_MAX", 15))
     v_min_secs, v_max_secs = clip_duration_bounds()
+
+    api_key = (os.getenv("GEMINI_API_KEY") or "").strip()
+    has_valid_gemini = api_key.startswith("AIza") and len(api_key) >= 30
+
+    if not has_valid_gemini:
+        if llm_backend.active():
+            return _visual_clips_with_llm_backend(
+                video_path, video_duration, language,
+                v_min_clips, v_max_clips, v_min_secs, v_max_secs,
+                viewer_clips=viewer_clips)
+        print("❌ Error: GEMINI_API_KEY not found (or invalid).")
+        return None
+
+    print("🎥  Silent video — analyzing with Gemini vision (no transcript)...")
+    client = genai.Client(api_key=api_key)
+    model_name = os.environ.get("GEMINI_MODEL") or 'gemini-3.1-flash-lite'
 
     segments = vision_segments(video_duration, VISION_SEGMENT_SECONDS, VISION_MAX_SEGMENTS)
     try:
@@ -2465,6 +2595,12 @@ def get_visual_clips(video_path, video_duration, language="en", viewer_clips=Non
         clean = trim_to_best(dedupe_overlapping(clean), v_max_clips)
 
         if not clean:
+            if llm_backend.active():
+                print("⚠️ Gemini vision returned no clips — falling back to OpenCV + LLM backend.")
+                return _visual_clips_with_llm_backend(
+                    video_path, video_duration, language,
+                    v_min_clips, v_max_clips, v_min_secs, v_max_secs,
+                    viewer_clips=viewer_clips)
             print("⚠️ Vision pass returned no usable clips.")
             return None
         cost = _sum_costs(costs, model_name)
@@ -2479,6 +2615,11 @@ def get_visual_clips(video_path, video_duration, language="en", viewer_clips=Non
         raise
     except Exception as e:
         print(f"❌ Gemini vision error: {e}")
+        if llm_backend.active():
+            return _visual_clips_with_llm_backend(
+                video_path, video_duration, language,
+                v_min_clips, v_max_clips, v_min_secs, v_max_secs,
+                viewer_clips=viewer_clips)
         return None
 
 if __name__ == '__main__':

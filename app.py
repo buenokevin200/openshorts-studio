@@ -172,6 +172,18 @@ async def resolve_gemini(request: Request) -> Optional[str]:
     """Resolve the Gemini API key for a request.
 
     Cloud (hosted) is PAID-ONLY: there is no BYOK for the core pipeline, so the
+def _valid_google_key(val: Optional[str]) -> Optional[str]:
+    """Return val only if it looks like a real Google Gemini API key (starts with AIza)."""
+    v = (val or "").strip()
+    if v.startswith("AIza") and len(v) >= 30:
+        return v
+    return None
+
+
+async def resolve_gemini(request: Request) -> Optional[str]:
+    """Resolve the Gemini API key for this request.
+
+    Returns a key string or ``None``. When ``BILLING_ENABLED=true`` the client's
     ``X-Gemini-Key`` header is ignored — an entitled user (active plan or trial)
     gets the managed server key, everyone else gets ``None`` (→ 402, start trial).
     Self-host keeps BYOK: header wins, else the env fallback.
@@ -182,12 +194,19 @@ async def resolve_gemini(request: Request) -> Optional[str]:
             return managed_keys.gemini_key()
         return None
     apply_request_byok_env(request)
-    header = request.headers.get("X-Gemini-Key")
-    if header:
+    llm_prov = (request.headers.get("X-LLM-Provider") or os.environ.get("LLM_PROVIDER") or "").strip().lower()
+    header = (request.headers.get("X-Gemini-Key") or "").strip()
+    if llm_prov and llm_prov != "gemini":
+        # Non-Gemini LLM is active: only return a Gemini key if it is a genuine AIza... Google key
+        return _valid_google_key(header) or _valid_google_key(os.environ.get("GEMINI_API_KEY"))
+    if header and not header.lower().startswith("your_"):
         return header
-    if request.headers.get("X-LLM-Provider", "").strip().lower() == "gemini" and request.headers.get("X-LLM-Key"):
-        return request.headers.get("X-LLM-Key")
-    return os.environ.get("GEMINI_API_KEY")
+    if llm_prov == "gemini" and request.headers.get("X-LLM-Key"):
+        return request.headers.get("X-LLM-Key").strip()
+    env_gem = (os.environ.get("GEMINI_API_KEY") or "").strip()
+    if env_gem and not env_gem.lower().startswith("your_"):
+        return env_gem
+    return None
 
 
 def resolve_elevenlabs(request: Request, header_val: Optional[str] = None) -> Optional[str]:
@@ -235,7 +254,9 @@ def apply_request_byok_env(request: Request, target_env: Optional[dict] = None) 
                     env["LLM_API_KEY"] = llm_key
                 if llm_model:
                     env["LLM_MODEL"] = llm_model
-        if gemini_hdr:
+                if not _valid_google_key(gemini_hdr) and not _valid_google_key(env.get("GEMINI_API_KEY")):
+                    env.pop("GEMINI_API_KEY", None)
+        if _valid_google_key(gemini_hdr) or (llm_prov == "gemini" and gemini_hdr):
             env["GEMINI_API_KEY"] = gemini_hdr
         if el_key:
             env["ELEVENLABS_API_KEY"] = el_key
@@ -8590,8 +8611,10 @@ async def save_byok_config(req: UniversalByokConfigRequest):
                 os.environ["LLM_API_KEY"] = req.llm_api_key.strip()
             if req.llm_model:
                 os.environ["LLM_MODEL"] = req.llm_model.strip()
+            if not _valid_google_key(req.gemini_api_key) and not _valid_google_key(os.environ.get("GEMINI_API_KEY")):
+                os.environ.pop("GEMINI_API_KEY", None)
 
-    if req.gemini_api_key:
+    if _valid_google_key(req.gemini_api_key):
         os.environ["GEMINI_API_KEY"] = req.gemini_api_key.strip()
     if req.elevenlabs_api_key:
         os.environ["ELEVENLABS_API_KEY"] = req.elevenlabs_api_key.strip()
