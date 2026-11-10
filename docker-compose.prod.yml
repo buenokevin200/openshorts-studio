@@ -1,0 +1,67 @@
+services:
+  backend:
+    build: .
+    container_name: openshorts-backend
+    volumes:
+      - ./output:/app/output
+      - ./uploads:/app/uploads
+    environment:
+      - GEMINI_MODEL=gemini-3.1-flash-lite
+      - LLM_BASE_URL=https://api-ap-southeast-1.modelarts-maas.com/openai/v1
+      - LLM_MODEL=glm-5.2
+      - LLM_API_KEY=${LLM_API_KEY}
+      - WHISPER_MODEL=base
+      - WHISPER_DEVICE=cpu
+      - WHISPER_COMPUTE=int8
+      - FFMPEG_ENCODER=x264
+      - PUBLIC_API_URL=https://viral.novalinkdo.com
+      - RATE_LIMIT_ENABLED=0
+    restart: unless-stopped
+    networks:
+      - default
+      - coolify
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.openshorts-api.rule=Host(`viral.novalinkdo.com`) && PathPrefix(`/api`)"
+      - "traefik.http.routers.openshorts-api.entrypoints=http"
+      - "traefik.http.services.openshorts-api.loadbalancer.server.port=8000"
+      - "traefik.http.routers.openshorts-api-https.rule=Host(`viral.novalinkdo.com`) && PathPrefix(`/api`)"
+      - "traefik.http.routers.openshorts-api-https.entrypoints=https"
+      - "traefik.http.routers.openshorts-api-https.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.openshorts-api-https.service=openshorts-api"
+      # Catch-all for non-api routes (health, videos, etc)
+      - "traefik.http.routers.openshorts-backend.rule=Host(`viral.novalinkdo.com`) && !PathPrefix(`/`)"
+      - "traefik.http.routers.openshorts-backend.entrypoints=http"
+      - "traefik.http.routers.openshorts-backend.priority=2"
+      - "traefik.http.routers.openshorts-backend.service=openshorts-api"
+      - "traefik.http.routers.openshorts-backend-https.rule=Host(`viral.novalinkdo.com`) && !PathPrefix(`/`)"
+      - "traefik.http.routers.openshorts-backend-https.entrypoints=https"
+      - "traefik.http.routers.openshorts-backend-https.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.openshorts-backend-https.priority=2"
+      - "traefik.http.routers.openshorts-backend-https.service=openshorts-api"
+
+  frontend:
+    build:
+      context: ./dashboard
+      target: prod
+    container_name: openshorts-frontend
+    restart: unless-stopped
+    networks:
+      - default
+      - coolify
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.openshorts-web.rule=Host(`viral.novalinkdo.com`)"
+      - "traefik.http.routers.openshorts-web.entrypoints=http"
+      - "traefik.http.routers.openshorts-web.priority=1"
+      - "traefik.http.services.openshorts-web.loadbalancer.server.port=80"
+      - "traefik.http.routers.openshorts-web-https.rule=Host(`viral.novalinkdo.com`)"
+      - "traefik.http.routers.openshorts-web-https.entrypoints=https"
+      - "traefik.http.routers.openshorts-web-https.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.openshorts-web-https.priority=1"
+      - "traefik.http.routers.openshorts-web-https.service=openshorts-web"
+
+networks:
+  coolify:
+    external: true
+    name: coolify

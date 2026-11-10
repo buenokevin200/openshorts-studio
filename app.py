@@ -172,6 +172,11 @@ async def resolve_gemini(request: Request) -> Optional[str]:
     """Resolve the Gemini API key for a request.
 
     Cloud (hosted) is PAID-ONLY: there is no BYOK for the core pipeline, so the
+    client's X-Gemini-Key header is ignored.
+    """
+    pass
+
+
 def _valid_google_key(val: Optional[str]) -> Optional[str]:
     """Return val only if it looks like a real Google Gemini API key (starts with AIza)."""
     v = (val or "").strip()
