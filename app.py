@@ -4033,15 +4033,12 @@ async def process_endpoint(
         # Daily paid-proxy budget hit: this job runs on the free routes only.
         env.pop("PROXY_URL", None)
 
-    # Pre-flight quality gate: probe the offered resolution BEFORE starting, so
-    # the user can abort (refresh cookies / update yt-dlp) instead of burning
-    # 20 min on a 360p-only source. Fail-open: any probe error starts normally.
-    # The probe also runs under force_low_quality so the short-source check
-    # can't be bypassed through the quality-gate confirm. It runs AFTER the
-    # metering step (entitlement, job limit, balance, the hourly probe cap), so
-    # an account with no minutes cannot use it as a free yt-dlp runner; a
-    # rejection hands the reservation back.
-    if url and (QUALITY_GATE_MIN_HEIGHT > 0 or MIN_SOURCE_SECONDS > 0):
+    # Pre-flight quality gate: in cloud mode (or when FORCE_QUALITY_GATE=1 is set),
+    # probe the offered resolution BEFORE starting. In self-host mode, skip the
+    # synchronous yt-dlp + deno probe so POST /api/process responds in <50ms and
+    # never triggers Cloudflare 524 / reverse-proxy 504 timeouts.
+    run_sync_gate = BILLING_ENABLED or os.environ.get("FORCE_QUALITY_GATE", "").strip() in ("1", "true", "yes")
+    if url and run_sync_gate and (QUALITY_GATE_MIN_HEIGHT > 0 or MIN_SOURCE_SECONDS > 0):
         try:
             gate = await _quality_gate(url, force_low)
         except BaseException:

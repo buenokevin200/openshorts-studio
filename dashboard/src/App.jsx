@@ -254,6 +254,11 @@ const readableError = (raw) => {
     if (typeof d === 'string' && d) return d.slice(0, 300);
     if (d && typeof d.message === 'string') return d.message.slice(0, 300);
   } catch (_) { /* not JSON */ }
+  if (/^<!doctype html|<html/i.test(text)) {
+    const titleMatch = text.match(/<title>([^<]+)<\/title>/i);
+    const title = titleMatch ? titleMatch[1].trim() : 'Gateway / Proxy Error (502/524)';
+    return `El servidor backend aún se está iniciando o el proxy cortó la conexión (${title}). Espera 10 segundos y vuelve a intentar.`;
+  }
   return text.replace(/^Error:\s*/, '').slice(0, 300) || 'Something went wrong.';
 };
 // Matches the self-host JOB_RETENTION_SECONDS default. A restore whose job was
@@ -1185,7 +1190,12 @@ function App() {
         body = formData;
       }
 
-      const res = await apiFetch('/api/process', { method: 'POST', headers, body });
+      let res = await apiFetch('/api/process', { method: 'POST', headers, body });
+      if ([502, 503, 504, 521, 522, 524].includes(res.status)) {
+        setLogs(l => [...l, "⏳ Esperando al contenedor backend (reintentando)..."]);
+        await new Promise((r) => setTimeout(r, 3500));
+        res = await apiFetch('/api/process', { method: 'POST', headers, body });
+      }
 
       if (!res.ok) throw new Error(await res.text());
       const resData = await res.json();
